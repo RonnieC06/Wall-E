@@ -1,9 +1,11 @@
+// - - LIBRERIAS Y DECLARACIONES NECESARIAS PARA FUNCIONAR - - //
 // Librerias
 #include <AFMotor.h> // Motores
 #include <Wire.h> // Multiplexor
 #include <Adafruit_TCS34725.h> // RGB
 #include <MPU6050.h> // MPU
-#include <PID_v1_bc.h> // Control PID
+#include <Servo.h> // Servo
+#include <LiquidCrystal_I2C.h> // Pantalla LCD
 
 // Motores
 AF_DCMotor MDD(3); // Motor Delantero Derecho
@@ -20,33 +22,44 @@ AF_DCMotor MTI(1); // Motor Trasero Izquierdo
 #define ECHO_PIN_L 24
 
 #define MPX 0x70 // Conexion para el multiplexor
-#define MPU_C 5 // Canal del MPU en multiplexor
 
-MPU6050 mpu; // mpu
+#define LCD_ADDR 0x27 // Conexion para pantalla
+#define LCD_C 1       // Canal de la pantalla LCD
+#define RGB_C 4       // Canal del Sensor RGB en multiplexor
+#define MPU_C 2      // Canal del MPU en multiplexor
+#define GARRA_P 10    // Pin de la garra
+#define IR_PIN 29 // Pin del sensor infrarrojo
+
+MPU6050 mpu; // MPU
+Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_1X); // RGB
+LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2); // Pantalla LCD
+Servo garra;
 
 // Variables útiles para el mpu
 float gx_offset = 0, gy_offset = 0, gz_offset = 0;
-float gradosX = 0, gradosY = 0, gradosZ = 0;
 float grados_acumulados_x = 0, grados_acumulados_y = 0, grados_acumulados_z = 0;
 long last_time_update = 0;
 
+// Estado del Maze
+bool mazeIniciado = false;
+
+// - - SET UP DE LOS COMPONENTES - - //
 void setup() {
-  // Set up del monitor serial
   Serial.begin(9600);
   Wire.begin();
 
-  // Set up de Motores
+  // Motores
   MDD.run(RELEASE);
   MDI.run(RELEASE);
   MTD.run(RELEASE);
   MTI.run(RELEASE);
 
-  // Set up de Ultrasonicos
+  // Ultrasonicos
   pinMode(TRIG_PIN_R, OUTPUT); pinMode(ECHO_PIN_R, INPUT);
   pinMode(TRIG_PIN, OUTPUT); pinMode(ECHO_PIN, INPUT);
   pinMode(TRIG_PIN_L, OUTPUT); pinMode(ECHO_PIN_L, INPUT);
 
-  // Set up del giroscopio
+  // MPU
   selectChannel(MPU_C);
   mpu.initialize();
   if (mpu.testConnection()) {
@@ -55,9 +68,29 @@ void setup() {
   } else {
     Serial.println("Error con MPU6050");
   }
+
+  // RGB
+  selectChannel(RGB_C);
+  if (tcs.begin()) Serial.println("Sensor TCS34725 encontrado.");
+  else { Serial.println("No se encontró el sensor TCS34725."); while (1); }
+
+  // LCD
+  selectChannel(LCD_C);
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Robot Candidates");
+  delay(1000);
+
+  // Servo
+  garra.attach(GARRA_P);
+  garra.write(140);
+
+  // Infrarojo
+  pinMode(IR_PIN, INPUT);
 }
 
-// Funcion para iniciar mpu en multiplexor
+// - - FUNCIONES DEL MULTIPLEXOR - - //
 void selectChannel(uint8_t channel) {
   if (channel > 7) return;
   Wire.beginTransmission(MPX);
@@ -65,7 +98,70 @@ void selectChannel(uint8_t channel) {
   Wire.endTransmission();
 }
 
-// Funcion para calibrar MPU
+// - - FUNCIONES DE MOVIMIENTO - - //
+void adelante(int velocidad) {
+  MDD.setSpeed(velocidad); MDI.setSpeed(velocidad);
+  MTD.setSpeed(velocidad); MTI.setSpeed(velocidad);
+  MDD.run(FORWARD); MDI.run(FORWARD);
+  MTD.run(FORWARD); MTI.run(FORWARD);
+}
+
+void atras(int velocidad) {
+  MDD.setSpeed(velocidad); MDI.setSpeed(velocidad);
+  MTD.setSpeed(velocidad); MTI.setSpeed(velocidad);
+  MDD.run(BACKWARD); MDI.run(BACKWARD);
+  MTD.run(BACKWARD); MTI.run(BACKWARD);
+}
+
+void giro_derecha(int velocidad) {
+  MDD.setSpeed(velocidad); MDI.setSpeed(velocidad);
+  MTD.setSpeed(velocidad); MTI.setSpeed(velocidad);
+  MDD.run(BACKWARD); MDI.run(FORWARD);
+  MTD.run(BACKWARD); MTI.run(FORWARD);
+}
+
+void giro_izquierda(int velocidad) {
+  MDD.setSpeed(velocidad); MDI.setSpeed(velocidad);
+  MTD.setSpeed(velocidad); MTI.setSpeed(velocidad);
+  MDD.run(FORWARD); MDI.run(BACKWARD);
+  MTD.run(FORWARD); MTI.run(BACKWARD);
+}
+
+void detener() {
+  MDD.run(RELEASE);
+  MDI.run(RELEASE);
+  MTD.run(RELEASE);
+  MTI.run(RELEASE);
+}
+
+// - - FUNCIONES DE SENSORES - - //
+long obtenerDistancia(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(1);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(trigPin, LOW);
+  long duracion = pulseIn(echoPin, HIGH);
+  long distancia = duracion * 0.034 / 2;
+  return distancia;
+}
+
+// RGB
+String Color() {
+  uint16_t r, g, b, c;
+  selectChannel(RGB_C);
+  tcs.getRawData(&r, &g, &b, &c);
+  if ((r >= 11 && r <= 25) && (g >= 21 && g <= 35) && (b >= 6 && b <= 20)) return "Verde";
+  else if ((r >= 44 && r <= 58) && (g >= 7 && g <= 21) && (b >= 5 && b <= 19)) return "Rojo";
+  else if ((r >= 6 && r <= 22) && (g >= 14 && g <= 30) && (b >= 18 && b <= 34)) return "Azul";
+  else if ((r >= 100 && r <= 150) && (g >= 80 && g <= 120) && (b >= 15 && b <= 55)) return "Amarillo";
+  else if ((r >= 73 && r <= 95) && (g >= 26 && g <= 40) && (b >= 22 && b <= 36)) return "Rosa";
+  else if ((r >= 4 && r <= 18) && (g >= 2 && g <= 16) && (b >= 0 && b <= 13)) return "Negro";
+  else if (r > 150 && g > 150 && b > 100) return "Blanco";
+  else return "---";
+}
+
+// - - MPU - - //
 void calibrarMPU6050() {
   int16_t gx, gy, gz;
   long gx_sum = 0, gy_sum = 0;
@@ -77,157 +173,277 @@ void calibrarMPU6050() {
     gy_sum += gy;
     delay(2);
   }
-  // Promedio de lecturas
   gx_offset = gx_sum / muestras;
   gy_offset = gy_sum / muestras;
   Serial.println("Calibración completa.");
 }
 
-// Funcion para obtener cambios en angulos en cada eje
+
+/*
 void actualizarAngulo() {
   int16_t gx_raw, gy_raw, gz_raw;
   selectChannel(MPU_C);
   mpu.getRotation(&gx_raw, &gy_raw, &gz_raw);
 
-  // Funciones para lecturas precisas en grados/s
   float gx = (gx_raw - gx_offset) / 131.0;
   float gy = (gy_raw - gy_offset) / 131.0;
-  float gz = (gz_raw - gz_offset) / 131.0;
+  float gz = (gz_raw) / 131.0;
 
   long current_time = millis();
   float dt = (current_time - last_time_update) / 1000.0;
   last_time_update = current_time;
 
-  //Cambio en grados
-  float gradosX = gx * dt;
-  float gradosY = gy * dt;
-  float gradosZ = gz * dt;
-
-  grados_acumulados_x += gradosX;
-  grados_acumulados_y += gradosY;
-  grados_acumulados_z += gradosZ;
+  grados_acumulados_z += gz * dt;
 }
 
-// --- FUNCIONES DE MOVIMIENTO CON VELOCIDAD VARIABLE ---
-
-// La función ahora acepta un entero 'velocidad' (0-255)
-void adelante(int velocidad) {
-  MDD.setSpeed(velocidad); // OPTIMO = con velocidad de 90 , pero hay que calibrarlo un poco más alto para ver si esto lo hace menos exacto porque no sube la rampa de 25 grados
-  MDI.setSpeed(velocidad);
-  MTD.setSpeed(velocidad);//120
-  MTI.setSpeed(velocidad);
-
-  MDD.run(FORWARD);
-  MDI.run(FORWARD);
-  MTD.run(FORWARD);
-  MTI.run(FORWARD);
-}
-
-void atras(int velocidad) {
-  MDD.setSpeed(velocidad);
-  MDI.setSpeed(velocidad);//120
-  MTD.setSpeed(velocidad);
-  MTI.setSpeed(velocidad);
-
-  MDD.run(BACKWARD);
-  MDI.run(BACKWARD);
-  MTD.run(BACKWARD);
-  MTI.run(BACKWARD);
-}
-
-void giro_derecha(int velocidad) {
-  MDD.setSpeed(velocidad);//140
-  MDI.setSpeed(velocidad);
-  MTD.setSpeed(velocidad);
-  MTI.setSpeed(velocidad);
-
-  MDD.run(BACKWARD);
-  MDI.run(FORWARD);
-  MTD.run(BACKWARD);
-  MTI.run(FORWARD);
-}
-
-void giro_izquierda(int velocidad) {
-  MDD.setSpeed(velocidad); //140
-  MDI.setSpeed(velocidad);
-  MTD.setSpeed(velocidad);
-  MTI.setSpeed(velocidad);
-
-  MDD.run(FORWARD);
-  MDI.run(BACKWARD);
-  MTD.run(FORWARD);
-  MTI.run(BACKWARD);
-}
-
-void detener() {
-  MDD.run(RELEASE);
-  MDI.run(RELEASE);
-  MTD.run(RELEASE);
-  MTI.run(RELEASE);
-}
-
-// Funcion para dar vueltas de 90, ahora también pide la velocidad de giro
 void girar(float anguloObjetivo, bool derecha, int velocidadGiro) {
-  // Reiniciar grados en Z para medir el nuevo giro
   grados_acumulados_z = 0;
-  last_time_update = millis(); // Reiniciar el tiempo para un cálculo de ángulo preciso
+  last_time_update = millis();
 
-  // Iniciar el movimiento de giro con la velocidad especificada
-  if (derecha) {
-    giro_derecha(velocidadGiro);
-  } else {
-    giro_izquierda(velocidadGiro);
-  }
+  if (derecha) giro_derecha(velocidadGiro);
+  else giro_izquierda(velocidadGiro);
 
-  // Bucle que se ejecuta mientras no se alcance el ángulo objetivo
-  while (abs(grados_acumulados_z) < anguloObjetivo) {
-    actualizarAngulo(); // Actualiza constantemente el ángulo acumulado
-  }
-
-  // Detener los motores una vez que se alcanza el ángulo
+  while (abs(grados_acumulados_z) < anguloObjetivo) actualizarAngulo();
   detener();
+}*/
+
+// LCD
+void actualizarLCD(long distF, String colorDetectado) {
+  selectChannel(LCD_C);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Dist F: ");
+  lcd.print(distF);
+  lcd.print(" cm");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Color: ");
+  lcd.print(colorDetectado);
 }
 
-
-// Funcion ultrasonicos
-long obtenerDistancia(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  // Distancia en cm
-  long duracion = pulseIn(echoPin, HIGH);
-  long distancia = duracion * 0.034 / 2;
-  return distancia;
-}
+// - - LOOP PARA MAZE - - //
+/*bool giroDerechaSiguiente = false; 
 
 void loop() {
-
-  // Definir velocidades para tener un control más fácil
   int velocidad = 150;
   int velocidadGiro = 150;
 
-  // Distancias de cada Ultrasonico
-  long distF = obtenerDistancia(TRIG_PIN, ECHO_PIN); // Frontral
-  long distL = obtenerDistancia(TRIG_PIN_L, ECHO_PIN_L); // Izquierdo
-  long distR = obtenerDistancia(TRIG_PIN_R, ECHO_PIN_R); // Derecho
+  static bool mazeIniciado = false;
+  static bool regreso = false;
 
-  // Codigo Maze y Pelota
-  if ((distF < 8) && (distR < 10)) {
-    girar(85, false, velocidadGiro); // Girar a la izquierda
-  } else if ((distF < 8) && (distL < 10)) {
-    girar(85, true, velocidadGiro);  // Girar a la derecha
-  } else if ((distF < 8) && (distL < 10) && (distR < 10)) {
-    // Dar media vuelta (dos giros a la derecha)
-    girar(85, true, velocidadGiro);
-    girar(85, true, velocidadGiro);
-  } else if ((distL < 10) && (distR < 10)) {
+  long distF = obtenerDistancia(TRIG_PIN, ECHO_PIN);
+  long distL = obtenerDistancia(TRIG_PIN_L, ECHO_PIN_L);
+  long distR = obtenerDistancia(TRIG_PIN_R, ECHO_PIN_R);
+
+  String color = Color();
+  actualizarLCD(distF, color);
+
+  // Empezar si detecta color verde
+  if (!mazeIniciado && color == "Verde") {
+    mazeIniciado = true;
+    Serial.println("¡Color verde detectado! Iniciando maze...");
+  }
+
+  // Si no detecta color verde, no se mueve
+  if (!mazeIniciado) {
+    detener();
+    return;
+  }
+
+  // Retroceder y girar a la derecha si detecta color negro
+  if (color == "Negro") {
+    Serial.println("Color negro detectado - retrocediendo y girando derecha");
+    detener();
+    atras(150);
+    delay(100);
+    detener();
+    giro_izquierda(velocidadGiro);
+    delay(1550);
+    return;
+  }
+
+  // Avanzar un momento y detenerse si detecta color rojo
+  if (color == "Rojo") {
+    Serial.println("Color rojo detectado - avanzando y deteniéndose");
+    adelante(150);
+    delay(250);
+    detener();
+    regreso = true; // Se activa siguiente parte del código
+  }
+
+  if (regreso) {
+    adelante(150);
+    if (color == "Verde") {
+      Serial.println("Color verde en regreso — sigue 250ms y cambia a reversa");
+      adelante(150);
+      delay(250);
+      atras(150);
+    }
+    if (color == "Rojo") {
+      Serial.println("Color rojo encontrado otra vez, detener");
+      detener();
+      regreso = false;
+      mazeIniciado = false;
+      return;
+    }
+  }
+
+  // Movimiento del robot con base en los ultrasonicos
+  if ((distF < 12) && (distR < 12)) {
+    giro_izquierda(velocidadGiro);
+  }
+  else if ((distF < 12) && (distL < 12)) {
+    giro_derecha(velocidadGiro);
+    delay(1500);
+  }
+  else if ((distF < 12) && (distL < 12) && (distR < 12)) {
+      atras(velocidad);
+      delay(1250);
+      giro_derecha(velocidadGiro);
+      delay(1500);
+  }
+   else if (distF < 12) {
+    detener();
+    delay(200);
+
+    // Compuerta logica para evitar caer en loops
+    if (giroDerechaSiguiente) {
+      Serial.println("Obstáculo al frente — girando DERECHA");
+      giro_derecha(velocidadGiro);
+      delay(1500);
+    } else {
+      Serial.println("Obstáculo al frente — girando IZQUIERDA");
+      giro_izquierda(velocidadGiro);
+      delay(1500);
+    }
+
+    // Alternar el sentido para la próxima vez
+    giroDerechaSiguiente = !giroDerechaSiguiente;
+  }
+  //else if ((distR > 15) && (distL > 15)) {
+    //giro_izquierda(velocidadGiro);
+  //}
+  else {
     adelante(velocidad);
-  } else if (distF < 8) {
-    girar(85, true, velocidadGiro); // Girar a la derecha
-  } else {
+  }
+} */
+
+
+// - - LOOP PARA PELOTA - - //
+
+void loop() {
+
+  int velocidad = 60;
+  int velocidadGiro = 130;
+  static bool recorridoIniciado = false;
+  static bool tienePelota = false;
+  static bool puedeLeerBandera = true;
+
+  long distF = obtenerDistancia(TRIG_PIN, ECHO_PIN);
+  long distL = obtenerDistancia(TRIG_PIN_L, ECHO_PIN_L);
+  long distR = obtenerDistancia(TRIG_PIN_R, ECHO_PIN_R);
+  String color = Color();
+  actualizarLCD(distF, color);
+
+  int irValor = digitalRead(IR_PIN);
+
+  // Empezar si detecta color verde
+  if (!recorridoIniciado && color == "Verde") {
+    recorridoIniciado = true;
+    Serial.println("Inicio detectado (verde) - comenzando recorrido");
+    detener();
+    delay(500);
+    adelante(velocidad);
+  }
+
+  // Compuerta logica para iniciar o terminar recorridos
+  if (!recorridoIniciado) {
+    detener();
+    return;
+  }
+
+  // Agarrar pelota si el infrarrojo se enciende
+  if (irValor == LOW && !tienePelota) {
+    detener();
+    delay(1000);
+    Serial.println("Infrarrojo activado - cerrando garra");
+    garra.write(85);
+    delay(700);
+    tienePelota = true;
+    adelante(velocidad);
+  }
+
+  // Compuerta lógica para evitar que la garra se active multiples veces
+  if (color == "Blanco") {
+    if (!puedeLeerBandera) {
+        Serial.println("Blanco detectado. Listo para la siguiente bandera.");
+        puedeLeerBandera = true;
+    }
+  }
+
+  if (tienePelota && puedeLeerBandera) {
+    if (color == "Azul") {
+      Serial.println("Bandera Azul detectada - Soltando pelota");
+      detener();
+      delay(2000);
+      garra.write(140);
+      atras(velocidad);
+      delay(750);
+      adelante(velocidad);
+      delay(750);
+      garra.write(85);   
+      delay(1000);
+      adelante(velocidad); 
+      puedeLeerBandera = false; 
+    }
+    else if (color == "Amarillo") {
+      Serial.println("Bandera Amarilla detectada - Pateando pelota");
+      detener();
+      delay(1000);
+      garra.write(140);
+      delay(500);
+      adelante(velocidad); 
+      delay(500);           
+      detener();
+      delay(6000);
+      adelante(velocidad);
+      tienePelota = false; 
+      
+      puedeLeerBandera = false;
+    }
+  }
+
+  // Agarrar pelota si el infrarrojo se enciende
+  if (irValor == LOW && !tienePelota) {
+    detener();
+    delay(1000);
+    Serial.println("Infrarrojo activado - cerrando garra");
+    garra.write(85);
+    delay(700);
+    tienePelota = true;
+    adelante(velocidad);
+    delay(500);
+  }
+
+  // Terminar si detecta color rojo
+  if (color == "Rojo") {
+    Serial.println("Fin detectado (rojo) - Deteniendo robot");
+    detener();
+    recorridoIniciado = false;
+    tienePelota = false;
+  }
+
+  // Movimiento del robot con base en los ultrasonicos
+  if ((distF < 12) && (distL < 12)) {
+    giro_derecha(velocidadGiro);
+    delay(1550);
+  }
+  else if ((distF < 12) && (distR < 12)) {
+    giro_izquierda(velocidadGiro);
+    delay(1550);
+  }
+  else {
     adelante(velocidad);
   }
 }
+
